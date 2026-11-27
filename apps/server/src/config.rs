@@ -1,0 +1,430 @@
+use std::env;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ConfigError {
+    #[error("PORT must be an integer between 1 and 65535")]
+    InvalidPort,
+    #[error("STUN_PORT must be an integer between 1 and 65535")]
+    InvalidStunPort,
+    #[error("SESSION_SECRET must contain at least 32 characters in production")]
+    WeakProductionSecret,
+    #[error("ALLOWED_ORIGINS must contain at least one origin")]
+    MissingAllowedOrigins,
+    #[error("RELAY_URL and RELAY_AUTH_SECRET must be configured together")]
+    IncompleteRelayConfig,
+    #[error("RELAY_AUTH_SECRET must contain at least 32 characters")]
+    WeakRelaySecret,
+    #[error("production requires PUBLIC_RELAY_URL and RELAY_AUTH_SECRET")]
+    MissingProductionRelay,
+    #[error("production PUBLIC_RELAY_URL must use wss and a publicly reachable host")]
+    UnsafeProductionRelay,
+    #[error("production STUN_HOST must be a publicly reachable host")]
+    UnsafeProductionStun,
+    #[error("OPERATOR_TOKEN must contain at least 32 characters in production")]
+    WeakOperatorToken,
+    #[error("ROUTE_POLICY_MIN_ATTEMPTS must be between 3 and 1000")]
+    InvalidRoutePolicyMinimum,
+    #[error("OPENCADE_EVIDENCE_TCP_TUNNEL requires relay configuration")]
+    EvidenceTunnelWithoutRelay,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct Config {
+    pub database_url: String,
+    pub session_secret: String,
+    pub rust_log: String,
+    pub port: u16,
+    pub production: bool,
+    pub allowed_origins: Vec<String>,
+    pub stun_host: String,
+    pub stun_port: u16,
+    pub relay_url: Option<String>,
+    pub relay_secret: Option<String>,
+    pub operator_token: String,
+    pub evidence_tcp_tunnel_enabled: bool,
+    pub route_policy_min_attempts: u32,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("database_url", &"<redacted>")
+            .field("session_secret", &"<redacted>")
+            .field("rust_log", &self.rust_log)
+            .field("port", &self.port)
+            .field("production", &self.production)
+            .field("allowed_origins", &self.allowed_origins)
+            .field("stun_host", &self.stun_host)
+            .field("stun_port", &self.stun_port)
+            .field("relay_url", &self.relay_url)
+            .field(
+                "relay_secret",
+                &self.relay_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .field("operator_token", &"<redacted>")
+            .field(
+                "evidence_tcp_tunnel_enabled",
+                &self.evidence_tcp_tunnel_enabled,
+            )
+            .field("route_policy_min_attempts", &self.route_policy_min_attempts)
+            .finish()
+    }
+}
+
+impl Config {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_lookup(|key| env::var(key).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let database_url = lookup("DATABASE_URL")
+            .unwrap_or_else(|| "postgres://opencade:opencade@localhost:5432/opencade".to_string());
+        let session_secret =
+            lookup("SESSION_SECRET").unwrap_or_else(|| "dev-session-secret-change-me".to_string());
+        let rust_log = lookup("RUST_LOG").unwrap_or_else(|| "info".to_string());
+        let port = match lookup("PORT") {
+            Some(value) => value
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port > 0)
+                .ok_or(ConfigError::InvalidPort)?,
+            None => 8080,
+        };
+        let production =
+            lookup("OPENCADE_ENV").is_some_and(|value| value.eq_ignore_ascii_case("production"));
+        if production && session_secret.len() < 32 {
+            return Err(ConfigError::WeakProductionSecret);
+        }
+        let operator_token =
+            lookup("OPERATOR_TOKEN").unwrap_or_else(|| "dev-operator-token-change-me".to_string());
+        if production && operator_token.len() < 32 {
+            return Err(ConfigError::WeakOperatorToken);
+        }
+        let evidence_tcp_tunnel_enabled = lookup("OPENCADE_EVIDENCE_TCP_TUNNEL")
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        let route_policy_min_attempts = lookup("ROUTE_POLICY_MIN_ATTEMPTS")
+            .map(|value| value.parse::<u32>().ok())
+            .unwrap_or(Some(10))
+            .filter(|value| (3..=1000).contains(value))
+            .ok_or(ConfigError::InvalidRoutePolicyMinimum)?;
+
+        let allowed_origins = lookup("ALLOWED_ORIGINS")
+            .unwrap_or_else(|| {
+                "http://localhost:1420,tauri://localhost,http://tauri.localhost,https://tauri.localhost"
+                    .to_string()
+            })
+            .split(',')
+            .map(str::trim)
+            .filter(|origin| !origin.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if allowed_origins.is_empty() {
+            return Err(ConfigError::MissingAllowedOrigins);
+        }
+
+        let stun_host = lookup("STUN_HOST").unwrap_or_else(|| "stun.opencade.local".to_string());
+        let stun_port = match lookup("STUN_PORT") {
+            Some(value) => value
+                .parse::<u16>()
+                .ok()
+                .filter(|p| *p > 0)
+                .ok_or(ConfigError::InvalidStunPort)?,
+            None => 3478,
+        };
+        let public_relay_url = lookup("PUBLIC_RELAY_URL");
+        let relay_url = public_relay_url
+            .or_else(|| lookup("RELAY_URL"))
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        let relay_secret = lookup("RELAY_AUTH_SECRET")
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        if relay_url.is_some() != relay_secret.is_some() {
+            return Err(ConfigError::IncompleteRelayConfig);
+        }
+        if relay_secret
+            .as_ref()
+            .is_some_and(|secret| secret.len() < 32)
+        {
+            return Err(ConfigError::WeakRelaySecret);
+        }
+        if evidence_tcp_tunnel_enabled && relay_url.is_none() {
+            return Err(ConfigError::EvidenceTunnelWithoutRelay);
+        }
+        if production {
+            let relay = relay_url
+                .as_deref()
+                .ok_or(ConfigError::MissingProductionRelay)?;
+            if !is_safe_public_relay(relay) {
+                return Err(ConfigError::UnsafeProductionRelay);
+            }
+            if !is_public_host(&stun_host) {
+                return Err(ConfigError::UnsafeProductionStun);
+            }
+        }
+
+        Ok(Self {
+            database_url,
+            session_secret,
+            rust_log,
+            port,
+            production,
+            allowed_origins,
+            stun_host,
+            stun_port,
+            relay_url,
+            relay_secret,
+            operator_token,
+            evidence_tcp_tunnel_enabled,
+            route_policy_min_attempts,
+        })
+    }
+
+    pub fn for_test() -> Self {
+        Self {
+            database_url: "postgres://opencade:opencade@localhost:5432/opencade_test".into(),
+            session_secret: "test-session-secret-with-32-characters".into(),
+            rust_log: "info".into(),
+            port: 8080,
+            production: false,
+            allowed_origins: vec!["http://localhost:1420".into()],
+            stun_host: "127.0.0.1".into(),
+            stun_port: 3478,
+            relay_url: None,
+            relay_secret: None,
+            operator_token: "test-operator-token-with-32-characters".into(),
+            evidence_tcp_tunnel_enabled: false,
+            route_policy_min_attempts: 10,
+        }
+    }
+}
+
+fn is_safe_public_relay(value: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(value) else {
+        return false;
+    };
+    parsed.scheme() == "wss"
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+        && parsed.host_str().is_some_and(is_public_host)
+}
+
+fn is_public_host(host: &str) -> bool {
+    let host = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if let Ok(address) = host.parse::<std::net::IpAddr>() {
+        return match address {
+            std::net::IpAddr::V4(address) => {
+                !(address.is_private()
+                    || address.is_loopback()
+                    || address.is_link_local()
+                    || address.is_unspecified()
+                    || address.is_broadcast()
+                    || address.is_documentation())
+            }
+            std::net::IpAddr::V6(address) => {
+                !(address.is_loopback()
+                    || address.is_unspecified()
+                    || address.is_multicast()
+                    || address.is_unique_local()
+                    || address.is_unicast_link_local())
+            }
+        };
+    }
+    !host.is_empty() && host != "localhost" && !host.ends_with(".local")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn load_config(values: &[(&str, &str)]) -> Result<Config, ConfigError> {
+        let values = values.iter().copied().collect::<HashMap<_, _>>();
+        Config::from_lookup(|key| values.get(key).map(|value| (*value).to_string()))
+    }
+
+    #[test]
+    fn defaults_are_safe_for_local_development() {
+        let config = load_config(&[]).expect("development defaults should be valid");
+        assert_eq!(config.port, 8080);
+        assert!(!config.production);
+        assert!(config.allowed_origins.contains(&"tauri://localhost".into()));
+        assert!(
+            config
+                .allowed_origins
+                .contains(&"https://tauri.localhost".into())
+        );
+        assert_eq!(config.stun_host, "stun.opencade.local");
+        assert_eq!(config.stun_port, 3478);
+        assert_eq!(config.relay_url, None);
+        assert!(!config.evidence_tcp_tunnel_enabled);
+        assert_eq!(config.route_policy_min_attempts, 10);
+    }
+
+    #[test]
+    fn for_test_uses_deterministic_stun_defaults() {
+        let config = Config::for_test();
+        assert_eq!(config.stun_host, "127.0.0.1");
+        assert_eq!(config.stun_port, 3478);
+        assert_eq!(config.relay_url, None);
+    }
+
+    #[test]
+    fn rejects_invalid_port_instead_of_hiding_configuration_error() {
+        assert_eq!(
+            load_config(&[("PORT", "invalid")]),
+            Err(ConfigError::InvalidPort)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_stun_port() {
+        assert_eq!(
+            load_config(&[("STUN_PORT", "not_a_port")]),
+            Err(ConfigError::InvalidStunPort)
+        );
+        assert_eq!(
+            load_config(&[("STUN_PORT", "0")]),
+            Err(ConfigError::InvalidStunPort)
+        );
+    }
+
+    #[test]
+    fn parses_and_bounds_the_evidence_route_policy() {
+        let config = load_config(&[
+            ("OPENCADE_EVIDENCE_TCP_TUNNEL", "true"),
+            ("ROUTE_POLICY_MIN_ATTEMPTS", "25"),
+            ("RELAY_URL", "wss://relay.example.com/relay"),
+            (
+                "RELAY_AUTH_SECRET",
+                "route-policy-relay-secret-at-least-32-bytes",
+            ),
+        ])
+        .expect("valid route policy");
+        assert!(config.evidence_tcp_tunnel_enabled);
+        assert_eq!(config.route_policy_min_attempts, 25);
+        assert_eq!(
+            load_config(&[("OPENCADE_EVIDENCE_TCP_TUNNEL", "true")]),
+            Err(ConfigError::EvidenceTunnelWithoutRelay)
+        );
+        assert_eq!(
+            load_config(&[("ROUTE_POLICY_MIN_ATTEMPTS", "2")]),
+            Err(ConfigError::InvalidRoutePolicyMinimum)
+        );
+        assert_eq!(
+            load_config(&[("ROUTE_POLICY_MIN_ATTEMPTS", "many")]),
+            Err(ConfigError::InvalidRoutePolicyMinimum)
+        );
+    }
+
+    #[test]
+    fn rejects_weak_production_secret() {
+        assert_eq!(
+            load_config(&[("OPENCADE_ENV", "production"), ("SESSION_SECRET", "weak")]),
+            Err(ConfigError::WeakProductionSecret)
+        );
+    }
+
+    #[test]
+    fn parses_explicit_origins() {
+        let config = load_config(&[(
+            "ALLOWED_ORIGINS",
+            "https://one.example, https://two.example",
+        )])
+        .expect("explicit origins should parse");
+        assert_eq!(
+            config.allowed_origins,
+            vec!["https://one.example", "https://two.example"]
+        );
+    }
+
+    #[test]
+    fn parses_stun_and_relay_env() {
+        let config = load_config(&[
+            ("STUN_HOST", "stun.example.com"),
+            ("STUN_PORT", "3479"),
+            ("RELAY_URL", "wss://relay.example.com/relay"),
+            (
+                "RELAY_AUTH_SECRET",
+                "relay-test-secret-at-least-32-bytes-long",
+            ),
+        ])
+        .expect("stun and relay should parse");
+        assert_eq!(config.stun_host, "stun.example.com");
+        assert_eq!(config.stun_port, 3479);
+        assert_eq!(
+            config.relay_url,
+            Some("wss://relay.example.com/relay".into())
+        );
+    }
+
+    #[test]
+    fn relay_url_absent_when_not_set_or_empty() {
+        let config = load_config(&[]).expect("defaults");
+        assert_eq!(config.relay_url, None);
+        assert_eq!(config.relay_secret, None);
+        let config = load_config(&[("RELAY_URL", "")]).expect("empty relay should be None");
+        assert_eq!(config.relay_url, None);
+        let config = load_config(&[("RELAY_URL", "   ")]).expect("whitespace relay should be None");
+        assert_eq!(config.relay_url, None);
+        assert_eq!(config.relay_secret, None);
+    }
+
+    #[test]
+    fn rejects_incomplete_or_weak_relay_configuration() {
+        assert_eq!(
+            load_config(&[("RELAY_URL", "wss://relay.example.com/relay")]),
+            Err(ConfigError::IncompleteRelayConfig)
+        );
+        assert_eq!(
+            load_config(&[
+                ("RELAY_URL", "wss://relay.example.com/relay"),
+                ("RELAY_AUTH_SECRET", "weak"),
+            ]),
+            Err(ConfigError::WeakRelaySecret)
+        );
+    }
+
+    #[test]
+    fn production_requires_public_network_endpoints_and_operator_token() {
+        let base = [
+            ("OPENCADE_ENV", "production"),
+            ("SESSION_SECRET", "session-secret-at-least-32-characters"),
+            ("RELAY_AUTH_SECRET", "relay-secret-at-least-32-characters"),
+            ("PUBLIC_RELAY_URL", "wss://relay.example.com/relay"),
+            ("STUN_HOST", "stun.example.com"),
+        ];
+        assert_eq!(load_config(&base), Err(ConfigError::WeakOperatorToken));
+
+        let mut valid = base.to_vec();
+        valid.push(("OPERATOR_TOKEN", "operator-token-at-least-32-characters"));
+        assert!(load_config(&valid).is_ok());
+
+        let mut unsafe_relay = valid.clone();
+        unsafe_relay.retain(|(key, _)| *key != "PUBLIC_RELAY_URL");
+        unsafe_relay.push(("PUBLIC_RELAY_URL", "ws://127.0.0.1:8081/relay"));
+        assert_eq!(
+            load_config(&unsafe_relay),
+            Err(ConfigError::UnsafeProductionRelay)
+        );
+
+        let mut private_relay = valid.clone();
+        private_relay.retain(|(key, _)| *key != "PUBLIC_RELAY_URL");
+        private_relay.push(("PUBLIC_RELAY_URL", "wss://192.168.1.10/relay"));
+        assert_eq!(
+            load_config(&private_relay),
+            Err(ConfigError::UnsafeProductionRelay)
+        );
+
+        let mut credentialed_relay = valid;
+        credentialed_relay.retain(|(key, _)| *key != "PUBLIC_RELAY_URL");
+        credentialed_relay.push(("PUBLIC_RELAY_URL", "wss://user@relay.example.com/relay"));
+        assert_eq!(
+            load_config(&credentialed_relay),
+            Err(ConfigError::UnsafeProductionRelay)
+        );
+    }
+}

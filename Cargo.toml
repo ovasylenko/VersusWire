@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "apps/server",
+    "packages/protocol",
+    "packages/networking",
+    "packages/emulator-sdk",
+    "packages/shared",
+    "packages/game-definitions",
+    "adapters/fbneo",
+    "adapters/retroarch",
+    "services/relay",
+    "crates/proof-of-match",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "Apache-2.0"
+repository = "https://github.com/ovasylenko/VersusWire"
+rust-version = "1.98"

@@ -1,0 +1,136 @@
+import type { ChallengePayload } from "./generated/ChallengePayload.js";
+import type { ChatPayload } from "./generated/ChatPayload.js";
+import type { MatchEndpointPayload } from "./generated/MatchEndpointPayload.js";
+import type { MatchCandidateKind } from "./generated/MatchCandidateKind.js";
+import type { NatMappingState } from "./generated/NatMappingState.js";
+import type { MatchProbeCompletedPayload } from "./generated/MatchProbeCompletedPayload.js";
+import type { MatchReport } from "./generated/MatchReport.js";
+import type { MatchReportClient } from "./generated/MatchReportClient.js";
+import type { MatchReportCompatibility } from "./generated/MatchReportCompatibility.js";
+import type { MatchPreflightPayload } from "./generated/MatchPreflightPayload.js";
+import type { ControllerPreflightPayload } from "./generated/ControllerPreflightPayload.js";
+import type { MatchReceiptPayload } from "./generated/MatchReceiptPayload.js";
+import type { NativeRoutePolicyPayload } from "./generated/NativeRoutePolicyPayload.js";
+import type { PublicCompatibilityCohort } from "./generated/PublicCompatibilityCohort.js";
+import type { PublicCompatibilityPayload } from "./generated/PublicCompatibilityPayload.js";
+import type { LaunchBarrierPayload } from "./generated/LaunchBarrierPayload.js";
+import type { NativeRouteCapability } from "./generated/NativeRouteCapability.js";
+import type { RoomInvitePayload } from "./generated/RoomInvitePayload.js";
+import type { RoomSnapshotPayload } from "./generated/RoomSnapshotPayload.js";
+import type { AlphaEvidenceKind } from "./generated/AlphaEvidenceKind.js";
+import type { AlphaFailureReport } from "./generated/AlphaFailureReport.js";
+import type { AlphaFailureStage } from "./generated/AlphaFailureStage.js";
+import type { MatchReportProbe } from "./generated/MatchReportProbe.js";
+import type { MatchReportRoom } from "./generated/MatchReportRoom.js";
+import type { PresencePayload } from "./generated/PresencePayload.js";
+import type { RoomPayload } from "./generated/RoomPayload.js";
+import type { SessionAnswerPayload } from "./generated/SessionAnswerPayload.js";
+import type { SessionCandidatePayload } from "./generated/SessionCandidatePayload.js";
+import type { SessionOfferPayload } from "./generated/SessionOfferPayload.js";
+import type { ActivationSummaryPayload } from "./generated/ActivationSummaryPayload.js";
+import type { ProductEventName } from "./generated/ProductEventName.js";
+import type { ProductEventPayload } from "./generated/ProductEventPayload.js";
+import type { ReadinessBlockCount } from "./generated/ReadinessBlockCount.js";
+import type { ReadinessCheckId } from "./generated/ReadinessCheckId.js";
+
+export type {
+  ChallengePayload,
+  ChatPayload,
+  MatchEndpointPayload,
+  MatchCandidateKind,
+  NatMappingState,
+  MatchProbeCompletedPayload,
+  MatchReport,
+  MatchReportClient,
+  MatchReportCompatibility,
+  MatchPreflightPayload,
+  ControllerPreflightPayload,
+  MatchReceiptPayload,
+  NativeRoutePolicyPayload,
+  PublicCompatibilityCohort,
+  PublicCompatibilityPayload,
+  LaunchBarrierPayload,
+  NativeRouteCapability,
+  RoomInvitePayload,
+  RoomSnapshotPayload,
+  AlphaEvidenceKind,
+  AlphaFailureReport,
+  AlphaFailureStage,
+  MatchReportProbe,
+  MatchReportRoom,
+  PresencePayload,
+  RoomPayload,
+  SessionAnswerPayload,
+  SessionCandidatePayload,
+  SessionOfferPayload,
+  ActivationSummaryPayload,
+  ProductEventName,
+  ProductEventPayload,
+  ReadinessBlockCount,
+  ReadinessCheckId,
+};
+export type { ChallengeState } from "./generated/ChallengeState.js";
+export type { RoomState } from "./generated/RoomState.js";
+export type { MatchReportRole } from "./generated/MatchReportRole.js";
+export type { MatchReportTransport } from "./generated/MatchReportTransport.js";
+
+export type HelloPayload = {
+  user_id: string;
+  protocol_version: string;
+};
+
+export type ErrorPayload = {
+  code: string;
+  message: string;
+};
+
+export type EnvelopeType =
+  | "presence.update"
+  | "chat.message"
+  | "challenge.created"
+  | "challenge.accepted"
+  | "challenge.declined"
+  | "challenge.cancelled"
+  | "challenges.incoming"
+  | "signaling.offer"
+  | "signaling.answer"
+  | "signaling.candidate"
+  | "signaling.relayed"
+  | "match.endpoint"
+  | "match.endpoint.relayed"
+  | "match.probe.completed"
+  | "match.probe.completed.relayed"
+  | "room.state"
+  | "room.snapshot"
+  | "connection.hello"
+  | "error"
+  | "ping"
+  | "pong";
+
+const KNOWN_ENVELOPE_TYPES: ReadonlySet<string> = new Set<EnvelopeType>([
+  "presence.update",
+  "chat.message",
+  "challenge.created",
+  "challenge.accepted",
+  "challenge.declined",
+  "challenge.cancelled",
+  "challenges.incoming",
+  "signaling.offer",
+  "signaling.answer",
+  "signaling.candidate",
+  "signaling.relayed",
+  "match.endpoint",
+  "match.endpoint.relayed",
+  "match.probe.completed",
+  "match.probe.completed.relayed",
+  "room.state",
+  "room.snapshot",
+  "connection.hello",
+  "error",
+  "ping",
+  "pong",
+]);
+
+export function isKnownEnvelopeType(type: string): type is EnvelopeType {
+  return KNOWN_ENVELOPE_TYPES.has(type);
+}

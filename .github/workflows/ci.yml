@@ -1,0 +1,230 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+# Cancel in-progress runs for the same ref
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: opencade
+          POSTGRES_PASSWORD: opencade
+          POSTGRES_DB: opencade_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U opencade -d opencade_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98"
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --all-features --locked
+        env:
+          DATABASE_URL: postgres://opencade:opencade@localhost:5432/opencade_test
+          SESSION_SECRET: ci-test-secret-at-least-32-bytes-long
+
+      - name: Setup pnpm for protocol drift check
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js for protocol drift check
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install protocol formatter
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate TypeScript protocol bindings
+        run: cargo test -p opencade-protocol --lib export_bindings
+
+      - name: Normalize generated protocol bindings
+        run: pnpm exec prettier --ignore-path /dev/null --write packages/protocol/src/generated
+
+      - name: Protocol bindings are committed
+        run: git diff --exit-code -- packages/protocol/src/generated
+
+  web:
+    name: Web (format:check / build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: pnpm format:check
+        run: pnpm format:check
+
+      - name: pnpm typecheck
+        run: pnpm typecheck
+
+      - name: pnpm test
+        run: pnpm test
+
+      - name: pnpm build
+        run: pnpm build
+
+      - name: Upload client bundle for desktop checks
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-dist
+          path: apps/client/dist
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Docker Compose configuration
+        run: docker compose config
+        env:
+          POSTGRES_PASSWORD: ci-postgres-password
+          SESSION_SECRET: ci-compose-secret-at-least-32-bytes
+          RELAY_AUTH_SECRET: ci-relay-secret-at-least-32-bytes-long
+          OPERATOR_TOKEN: ci-operator-token-at-least-32-bytes-long
+          PUBLIC_RELAY_URL: wss://relay.example.test/relay
+          STUN_HOST: stun.example.test
+
+  security:
+    name: Dependency and container security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98"
+      - name: Audit Rust dependencies
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit --deny warnings
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Audit production JavaScript dependencies
+        run: pnpm audit --prod --audit-level high
+      - name: Build production containers
+        run: |
+          docker build -f apps/server/Dockerfile -t opencade-server:ci .
+          docker build -f services/relay/Dockerfile -t opencade-relay:ci .
+
+  desktop:
+    name: Desktop Rust (Windows / MSRV)
+    runs-on: windows-latest
+    needs: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download client bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: client-dist
+          path: apps/client/dist
+
+      - name: Install Rust MSRV
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98"
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/client/src-tauri
+
+      - name: Build Windows LAN alpha tools
+        run: cargo build -p opencade-networking --bins --release --locked
+
+      - name: Configure MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build deterministic OpenCade test core
+        shell: pwsh
+        run: .\scripts\alpha\Build-TestCore.ps1
+
+      - name: Build Windows desktop alpha
+        run: cargo build --manifest-path apps/client/src-tauri/Cargo.toml --release --locked
+
+      - name: Package and verify Windows alpha kit
+        shell: pwsh
+        run: .\scripts\alpha\OpenCade-Alpha.ps1 -Mode Package -KitRoot alpha-kit
+
+      - name: Alpha kit verifier rejects tampering
+        shell: pwsh
+        run: |
+          Copy-Item alpha-kit alpha-kit-tampered -Recurse
+          Add-Content -LiteralPath alpha-kit-tampered\opencade-client.exe -Value "tampered"
+          $failedClosed = $false
+          try {
+            .\scripts\alpha\OpenCade-Alpha.ps1 -Mode Verify -KitRoot alpha-kit-tampered
+          } catch {
+            $failedClosed = $true
+          }
+          if (-not $failedClosed) {
+            throw "Alpha kit verifier accepted a tampered executable"
+          }
+
+      - name: Upload Windows LAN alpha tools
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencade-windows-alpha
+          path: alpha-kit
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Check desktop backend
+        run: cargo check --manifest-path apps/client/src-tauri/Cargo.toml --all-targets --locked
+
+      - name: Clippy desktop backend
+        run: cargo clippy --manifest-path apps/client/src-tauri/Cargo.toml --all-targets --locked -- -D warnings
